@@ -4,8 +4,7 @@ const ToastContext = createContext(null);
 
 const TOAST_DURATION_MS = 4000;
 
-// Self-contained toast queue; optional `key` lets repeated warnings refresh
-// one toast instead of stacking duplicates.
+// Self-contained toast queue; optional `key` lets repeated warnings refresh one toast instead of stacking.
 export function ToastProvider({ children }) {
   const [toasts, setToasts] = useState([]);
   const timersRef = useRef(new Map()); // id -> timeout id

@@ -1,10 +1,12 @@
 const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
 const Room = require('../models/Room');
 const validation = require('../utils/validation');
 const { reconstructState, getUndoRedoDepth, getLastUndoRedoTarget } = require('../utils/replay');
 const { maybeCreateSnapshot, loadFullState, RESHAPING_TYPES } = require('../utils/snapshot');
 
 const DRAWING_LOG_WARN_THRESHOLD = 5000;
+const PASSWORD_SALT_ROUNDS = 10;
 
 function broadcastPresence(io, roomUsers, roomId) {
   const roster = roomUsers[roomId] ? Array.from(roomUsers[roomId].values()) : [];
@@ -115,42 +117,57 @@ module.exports = (io) => {
     // Generous headroom over legitimate rates; only catches an actual flood.
     const allowDrawing = createRateLimiter(150, 1000);
     const allowCursorMove = createRateLimiter(150, 1000);
+    // A manual, occasional UI action that does a real DB read — tighter budget than the two above.
+    const allowTimelineRequest = createRateLimiter(5, 10000);
 
-    socket.on('join-room', async (payload) => {
+    socket.on('join-room', async (payload, ack) => {
       if (!validation.isValidJoinRoomPayload(payload)) {
         console.warn(`Rejecting malformed join-room payload from ${socket.id}`);
+        if (typeof ack === 'function') ack({ status: 'error', reason: 'invalid-payload' });
         return;
       }
-      const { roomId, name, color, authorId } = payload;
+      const { roomId, name, color, authorId, password } = payload;
+
+      // Needs the room's passwordHash before registering the socket (await unavoidable); '' and undefined both mean "no password".
+      try {
+        // Atomic upsert avoids a find-then-save race (e.g. React StrictMode's double effect) hitting a duplicate-key error.
+        const passwordHash = password ? await bcrypt.hash(password, PASSWORD_SALT_ROUNDS) : null;
+        const rawResult = await Room.findOneAndUpdate(
+          { roomId },
+          { $setOnInsert: { roomId, passwordHash } },
+          { upsert: true, new: true, setDefaultsOnInsert: true, includeResultMetadata: true }
+        );
+        const room = rawResult.value;
+
+        if (rawResult.lastErrorObject && rawResult.lastErrorObject.upserted) {
+          console.log(`Created new room in database: ${roomId}`);
+        } else if (room.passwordHash) {
+          const matches = password ? await bcrypt.compare(password, room.passwordHash) : false;
+          if (!matches) {
+            console.warn(`Rejecting join-room from ${socket.id}: wrong password for room ${roomId}`);
+            if (typeof ack === 'function') ack({ status: 'error', reason: 'invalid-password' });
+            return;
+          }
+        }
+      } catch (err) {
+        console.error('Error checking/creating room in database:', err);
+        if (typeof ack === 'function') ack({ status: 'error', reason: 'server-error' });
+        return;
+      }
 
       socket.join(roomId);
       currentRoom = roomId;
       console.log(`User ${socket.id} joined room ${roomId}`);
 
-      const isFirstInTrackedRoom = !roomUsers[roomId];
-      if (isFirstInTrackedRoom) {
+      if (!roomUsers[roomId]) {
         roomUsers[roomId] = new Map();
       }
-      // Set before any `await` below, so a same-socket event fired right
-      // after join-room can't race ahead of this registration.
       roomUsers[roomId].set(socket.id, { id: socket.id, name: name.trim(), color, isDrawing: false, authorId });
-
-      if (isFirstInTrackedRoom) {
-        try {
-          let room = await Room.findOne({ roomId });
-          if (!room) {
-            room = new Room({ roomId });
-            await room.save();
-            console.log(`Created new room in database: ${roomId}`);
-          }
-        } catch (err) {
-          console.error('Error checking/creating room in database:', err);
-        }
-      }
 
       console.log(`Room ${roomId} now has ${roomUsers[roomId].size} users`);
 
       broadcastPresence(io, roomUsers, roomId);
+      if (typeof ack === 'function') ack({ status: 'ok' });
     });
 
     socket.on('leave-room', (roomId) => {
@@ -369,7 +386,13 @@ module.exports = (io) => {
         socket.emit('sync-response', { ops: [], full: true, error: 'invalid-payload' });
         return;
       }
-      const { roomId, sinceId } = payload;
+      const { roomId, sinceId, authorId } = payload;
+
+      if (getRegisteredAuthorId(roomUsers, roomId, socket.id) !== authorId) {
+        console.warn(`Rejecting sync-since from ${socket.id}: not registered for room ${roomId}`);
+        socket.emit('sync-response', { ops: [], full: true, error: 'unauthorized' });
+        return;
+      }
 
       try {
         if (!sinceId) {
@@ -420,6 +443,54 @@ module.exports = (io) => {
       }
     });
 
+    // Read-only: full raw event log for history scrubbing — shows everything, undo/clear included, since room history is shared, not per-author-private.
+    socket.on('get-room-timeline', async (payload, ack) => {
+      if (!validation.isValidRoomAuthorPayload(payload)) {
+        console.warn(`Rejecting malformed get-room-timeline payload from ${socket.id}`);
+        if (typeof ack === 'function') ack({ status: 'error', reason: 'invalid-payload' });
+        return;
+      }
+      const { roomId, authorId } = payload;
+
+      if (getRegisteredAuthorId(roomUsers, roomId, socket.id) !== authorId) {
+        console.warn(`Rejecting get-room-timeline from ${socket.id}: not registered for room ${roomId}`);
+        if (typeof ack === 'function') ack({ status: 'error', reason: 'unauthorized' });
+        return;
+      }
+
+      if (!allowTimelineRequest()) {
+        console.warn(`Rate-limiting get-room-timeline from ${socket.id}`);
+        if (typeof ack === 'function') ack({ status: 'error', reason: 'rate-limited' });
+        return;
+      }
+
+      try {
+        const room = await Room.findOne({ roomId });
+        if (!room) {
+          if (typeof ack === 'function') ack({ status: 'error', reason: 'room-not-found' });
+          return;
+        }
+
+        // Caps the payload for very large rooms — reuses the same threshold that flags them elsewhere.
+        if (room.drawingData.length > DRAWING_LOG_WARN_THRESHOLD) {
+          if (typeof ack === 'function') ack({ status: 'error', reason: 'room-too-large' });
+          return;
+        }
+
+        const events = room.drawingData.map(item => ({
+          type: item.type,
+          data: item.data,
+          authorId: item.authorId,
+          opId: item.opId,
+          timestamp: item.timestamp
+        }));
+        if (typeof ack === 'function') ack({ status: 'ok', events });
+      } catch (err) {
+        console.error(`Error loading timeline for room ${roomId}:`, err);
+        if (typeof ack === 'function') ack({ status: 'error', reason: 'server-error' });
+      }
+    });
+
     socket.on('cursor-move', (payload) => {
       if (!validation.isValidCursorPayload(payload)) {
         return;
@@ -427,7 +498,11 @@ module.exports = (io) => {
       if (!allowCursorMove()) {
         return;
       }
-      const { roomId, position } = payload;
+      const { roomId, position, authorId } = payload;
+
+      if (getRegisteredAuthorId(roomUsers, roomId, socket.id) !== authorId) {
+        return;
+      }
 
       socket.to(roomId).emit('cursor-move', {
         userId: socket.id,
@@ -435,9 +510,15 @@ module.exports = (io) => {
       });
     });
 
-    socket.on('clear-canvas', (roomId) => {
-      if (!validation.isValidRoomId(roomId)) {
-        console.warn(`Rejecting malformed clear-canvas roomId from ${socket.id}`);
+    socket.on('clear-canvas', (payload) => {
+      if (!validation.isValidRoomAuthorPayload(payload)) {
+        console.warn(`Rejecting malformed clear-canvas payload from ${socket.id}`);
+        return;
+      }
+      const { roomId, authorId } = payload;
+
+      if (getRegisteredAuthorId(roomUsers, roomId, socket.id) !== authorId) {
+        console.warn(`Rejecting clear-canvas from ${socket.id}: not registered for room ${roomId}`);
         return;
       }
 

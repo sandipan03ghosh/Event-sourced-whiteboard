@@ -18,6 +18,8 @@ const MIN_LINE_WIDTH = 1;
 const MAX_LINE_WIDTH = 10;
 const MAX_OP_ID_LENGTH = 100;
 const MAX_AUTHOR_ID_LENGTH = 100;
+// bcrypt silently truncates past 72 bytes; capping here at that limit avoids two long passwords sharing a prefix both matching.
+const MAX_ROOM_PASSWORD_BYTES = 72;
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -74,6 +76,12 @@ function isValidObjectIdString(id) {
   return typeof id === 'string' && mongoose.Types.ObjectId.isValid(id);
 }
 
+// Empty/undefined means "no password provided" — valid; checked in bytes, matching what bcrypt counts.
+function isValidRoomPassword(password) {
+  if (password === undefined || password === '') return true;
+  return typeof password === 'string' && Buffer.byteLength(password, 'utf8') <= MAX_ROOM_PASSWORD_BYTES;
+}
+
 function isValidDrawingData(data) {
   if (!isPlainObject(data)) return false;
   if (
@@ -92,8 +100,7 @@ function isValidDrawingData(data) {
   return Math.sqrt(dx * dx + dy * dy) <= MAX_SEGMENT_LENGTH;
 }
 
-// Strips drawingData down to the fields isValidDrawingData checked; always
-// persist/broadcast this, never the raw payload.
+// Strips drawingData to the fields isValidDrawingData checked; always persist/broadcast this, never the raw payload.
 function sanitizeDrawingData(data) {
   return {
     x0: data.x0,
@@ -134,24 +141,27 @@ function isValidPresencePayload(payload) {
     isValidHexColor(payload.color);
 }
 
-// join-room: presence fields + the authorId this socket registers.
+// join-room: presence fields + authorId + an optional password (sets one on a new room, or attempts one on an existing).
 function isValidJoinRoomPayload(payload) {
-  return isValidPresencePayload(payload) && isValidAuthorId(payload.authorId);
+  return isValidPresencePayload(payload) && isValidAuthorId(payload.authorId) &&
+    isValidRoomPassword(payload.password);
 }
 
 function isValidCursorPayload(payload) {
   if (!isPlainObject(payload)) return false;
-  const { roomId, position } = payload;
+  const { roomId, position, authorId } = payload;
   return isValidRoomId(roomId) &&
+    isValidAuthorId(authorId) &&
     isPlainObject(position) &&
     isValidCoordinate(position.x) &&
     isValidCoordinate(position.y);
 }
 
+// sinceId undefined/null means "send the full history".
 function isValidSyncSincePayload(payload) {
   if (!isPlainObject(payload)) return false;
-  const { roomId, sinceId } = payload;
-  if (!isValidRoomId(roomId)) return false;
+  const { roomId, sinceId, authorId } = payload;
+  if (!isValidRoomId(roomId) || !isValidAuthorId(authorId)) return false;
   return sinceId === undefined || sinceId === null || isValidObjectIdString(sinceId);
 }
 
@@ -171,6 +181,7 @@ module.exports = {
   isValidRequiredOpId,
   isValidAuthorId,
   isValidObjectIdString,
+  isValidRoomPassword,
   isValidDrawingData,
   sanitizeDrawingData,
   isValidDrawingPayload,

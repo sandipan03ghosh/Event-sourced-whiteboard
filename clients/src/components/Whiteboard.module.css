@@ -23,7 +23,8 @@
   display: block;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  background: var(--color-surface);
+  /* Always light, regardless of theme — see --color-canvas-bg in tokens.css. */
+  background: var(--color-canvas-bg);
 }
 
 .syncOverlay {

@@ -1,5 +1,4 @@
-// Reconstructs state from the immutable, append-only drawingData log via a
-// single forward pass, shared by all three exported functions below.
+// Reconstructs state from the append-only drawingData log in one forward pass, shared by the exports below.
 function buildState(drawingData) {
   if (!Array.isArray(drawingData) || drawingData.length === 0) {
     return { visibleStrokes: [], activeStacks: new Map(), redoStacks: new Map(), lastEffect: null };

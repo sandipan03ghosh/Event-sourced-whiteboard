@@ -30,6 +30,15 @@ function RedoIcon() {
   );
 }
 
+function ClockIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M8 5V8L10 9.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function TrashIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -46,16 +55,17 @@ function TrashIcon() {
 function WhiteboardToolbar({
   canUndo, canRedo, onUndo, onRedo, onClearCanvas, onClearMyDrawings,
   strokeStyle, setStrokeStyle, lineWidth, setLineWidth,
-  zoomPercent, isConnected, isSyncing, pendingCount
+  zoomPercent, isConnected, isSyncing, pendingCount,
+  onToggleHistory, historyActive, historyLoading
 }) {
   return (
     <div className={styles.toolbar}>
       <div className={styles.group}>
-        <button type="button" className={styles.iconButton} onClick={onUndo} disabled={!canUndo}
+        <button type="button" className={styles.iconButton} onClick={onUndo} disabled={!canUndo || historyActive}
           aria-label="Undo" title="Undo (Ctrl+Z)">
           <UndoIcon />
         </button>
-        <button type="button" className={styles.iconButton} onClick={onRedo} disabled={!canRedo}
+        <button type="button" className={styles.iconButton} onClick={onRedo} disabled={!canRedo || historyActive}
           aria-label="Redo" title="Redo (Ctrl+Y)">
           <RedoIcon />
         </button>
@@ -106,15 +116,25 @@ function WhiteboardToolbar({
       <div className={styles.divider} />
 
       <div className={styles.group}>
-        <button type="button" className={styles.actionButton} onClick={onClearCanvas}
+        <button type="button" className={styles.actionButton} onClick={onClearCanvas} disabled={historyActive}
           title="Clear the entire board for everyone">
           <TrashIcon />
           <span>Clear All</span>
         </button>
-        <button type="button" className={styles.actionButton} onClick={onClearMyDrawings}
+        <button type="button" className={styles.actionButton} onClick={onClearMyDrawings} disabled={historyActive}
           title="Clear only your own drawings">
           <TrashIcon />
           <span>Clear Mine</span>
+        </button>
+      </div>
+
+      <div className={styles.divider} />
+
+      <div className={styles.group}>
+        <button type="button" className={styles.actionButton} onClick={onToggleHistory} disabled={historyLoading}
+          title="Scrub through this room's full history, including undone/cleared strokes">
+          <ClockIcon />
+          <span>{historyLoading ? 'Loading…' : historyActive ? 'Exit History' : 'History'}</span>
         </button>
       </div>
 

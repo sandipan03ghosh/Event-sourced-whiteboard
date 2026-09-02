@@ -63,8 +63,7 @@ async function maybeCreateSnapshot(roomId, drawingData) {
   }
 }
 
-// Uses the latest valid snapshot as a checkpoint when possible, else falls
-// back to a full replay (also the path if a reshaping event occurred since).
+// Uses a valid snapshot as a checkpoint when possible, else does a full replay.
 async function loadFullState(roomId) {
   try {
     const snapshot = await Snapshot.findOne({ roomId });

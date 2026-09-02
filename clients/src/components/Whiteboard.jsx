@@ -3,10 +3,14 @@ import socket from '../socket';
 import UserCursors from './UserCursors';
 import UsersPanel from './UsersPanel';
 import WhiteboardToolbar from './WhiteboardToolbar';
+import RoomPasswordGate from './RoomPasswordGate';
+import HistoryScrubber from './HistoryScrubber';
 import useSocketSync from '../hooks/useSocketSync';
+import { useToast } from '../context/ToastContext';
 import { getIdentity } from '../identity';
 import { screenToWorld, getVisibleWorldRect, getStrokeBounds } from '../utils/viewport';
 import { throttle } from '../utils/throttle';
+import { reconstructStateUpTo } from '../utils/replayView';
 import SpatialGrid from '../utils/spatialGrid';
 import styles from './Whiteboard.module.css';
 
@@ -22,7 +26,7 @@ function isStrokeVisible(data, rect) {
     bounds.maxY >= rect.minY && bounds.minY <= rect.maxY;
 }
 
-function Whiteboard({ roomId }) {
+function Whiteboard({ roomId, roomPassword }) {
   const canvasRef = useRef(null);
   const ctxRef = useRef(null);
   const drawing = useRef(false);
@@ -31,8 +35,7 @@ function Whiteboard({ roomId }) {
   const [lineWidth, setLineWidth] = useState(3);
   const containerRef = useRef(null);
 
-  // Currently-visible strokes; hiddenOpsRef caches undone ones for redo;
-  // myUndoOrderRef is a per-author LIFO for optimistic redo ordering.
+  // opsRef: visible strokes; hiddenOpsRef: undone ones cached for redo; myUndoOrderRef: per-author LIFO for optimistic redo.
   const opsRef = useRef([]); // [{opId, authorId, data, seq}], data in world coords
   const hiddenOpsRef = useRef(new Map()); // opId -> {opId, authorId, data, seq}
   const myUndoOrderRef = useRef([]); // my own opIds, most-recently-hidden last
@@ -40,6 +43,16 @@ function Whiteboard({ roomId }) {
   // Spatial index over opsRef, narrowing redraws to near-viewport strokes.
   const gridRef = useRef(new SpatialGrid());
   const nextSeqRef = useRef(0);
+
+  // History scrubbing: read-only overlay — when scrubStrokesRef is set, redrawAll paints it instead of the live grid, so opsRef/gridRef stay untouched.
+  const { showToast } = useToast();
+  const [historyMode, setHistoryMode] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [timelineEvents, setTimelineEvents] = useState(null);
+  const [scrubIndex, setScrubIndex] = useState(0);
+  const historyModeRef = useRef(false); // mirrors historyMode for stable-identity handlers
+  const scrubStrokesRef = useRef(null); // null = live rendering; array = frozen history view
+  useEffect(() => { historyModeRef.current = historyMode; }, [historyMode]);
 
   // Infinite-canvas viewport; pan/zoom batched via requestAnimationFrame.
   const [viewport, setViewport] = useState({ offsetX: 0, offsetY: 0, scale: 1 });
@@ -55,7 +68,8 @@ function Whiteboard({ roomId }) {
 
   const throttledCursorMove = useCallback(
     throttle((roomId, position) => {
-      socket.emit('cursor-move', { roomId, position });
+      const identity = getIdentity();
+      socket.emit('cursor-move', { roomId, position, authorId: identity.authorId });
     }, 10),
     [roomId]
   );
@@ -91,14 +105,24 @@ function Whiteboard({ roomId }) {
     ctx.setTransform(vp.scale, 0, 0, vp.scale, vp.offsetX, vp.offsetY);
 
     const visibleRect = getVisibleWorldRect(canvas.width, canvas.height, vp);
-    // Coarse grid pre-filter; isStrokeVisible is the precise final gate.
-    const candidates = gridRef.current.query(visibleRect);
-    candidates.sort((a, b) => a.seq - b.seq);
-    candidates.forEach(item => {
-      if (isStrokeVisible(item.data, visibleRect)) {
-        drawFromData(item.data);
-      }
-    });
+
+    if (scrubStrokesRef.current) {
+      // History view: a frozen, precomputed stroke list — bypasses the live spatial grid entirely.
+      scrubStrokesRef.current.forEach(data => {
+        if (isStrokeVisible(data, visibleRect)) {
+          drawFromData(data);
+        }
+      });
+    } else {
+      // Coarse grid pre-filter; isStrokeVisible is the precise final gate.
+      const candidates = gridRef.current.query(visibleRect);
+      candidates.sort((a, b) => a.seq - b.seq);
+      candidates.forEach(item => {
+        if (isStrokeVisible(item.data, visibleRect)) {
+          drawFromData(item.data);
+        }
+      });
+    }
 
     ctx.strokeStyle = strokeStyle;
     ctx.lineWidth = lineWidth;
@@ -155,8 +179,8 @@ function Whiteboard({ roomId }) {
 
   const {
     isConnected, isSyncing, pendingCount, sendDrawing, presence, renamePresence,
-    setDrawingActivity, canUndo, canRedo, sendUndo, sendRedo
-  } = useSocketSync(roomId, applySyncOps);
+    setDrawingActivity, canUndo, canRedo, sendUndo, sendRedo, joinError, retryJoin
+  } = useSocketSync(roomId, roomPassword, applySyncOps);
 
   const applyCanvasDefaults = useCallback(() => {
     const ctx = ctxRef.current;
@@ -177,9 +201,10 @@ function Whiteboard({ roomId }) {
     }
   }, []);
 
-  // Resizing a canvas resets all 2D context state, so defaults must be reapplied.
+  // Resizing resets 2D context state; also re-runs on joinError clearing since the canvas unmounts while the password gate shows.
   useEffect(() => {
     const canvas = canvasRef.current;
+    if (!canvas) return; // not mounted while the password gate is showing
     canvas.width = window.innerWidth * 0.8;
     canvas.height = window.innerHeight * 0.8;
     ctxRef.current = canvas.getContext('2d');
@@ -196,7 +221,7 @@ function Whiteboard({ roomId }) {
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomId]);
+  }, [roomId, joinError]);
 
   // Cursor-centered zoom; native non-passive listener so preventDefault works.
   useEffect(() => {
@@ -256,6 +281,8 @@ function Whiteboard({ roomId }) {
       const entry = { opId: payload.opId, authorId: payload.authorId, data: payload, seq: nextSeqRef.current++ };
       opsRef.current.push(entry);
       gridRef.current.insert(entry, getStrokeBounds(entry.data, CULL_PADDING));
+      // Keeps accumulating live state in the background, but doesn't paint over a frozen history view.
+      if (scrubStrokesRef.current) return;
       const canvas = canvasRef.current;
       if (canvas && isStrokeVisible(payload, getVisibleWorldRect(canvas.width, canvas.height, viewportRef.current))) {
         drawFromData(payload);
@@ -306,6 +333,7 @@ function Whiteboard({ roomId }) {
   }, [drawFromData, redrawAll]);
 
   const startDrawing = ({ nativeEvent }) => {
+    if (historyModeRef.current) return; // read-only while scrubbing history
     const isMiddleMouse = nativeEvent.button === 1;
     const isSpacePan = nativeEvent.button === 0 && isSpaceDownRef.current;
 
@@ -342,7 +370,7 @@ function Whiteboard({ roomId }) {
       return;
     }
 
-    if (!drawing.current) return;
+    if (!drawing.current || historyModeRef.current) return;
     const { offsetX, offsetY } = nativeEvent;
     const ctx = ctxRef.current;
     const world = screenToWorld(offsetX, offsetY, viewportRef.current);
@@ -383,21 +411,68 @@ function Whiteboard({ roomId }) {
   };
 
   const clearCanvas = () => {
+    if (historyModeRef.current) return;
     opsRef.current = [];
     gridRef.current.clear();
     hiddenOpsRef.current.clear();
     myUndoOrderRef.current = [];
     redrawAll();
-    socket.emit('clear-canvas', roomId);
+    const identity = getIdentity();
+    socket.emit('clear-canvas', { roomId, authorId: identity.authorId });
   };
 
   const clearMyDrawings = () => {
+    if (historyModeRef.current) return;
     const identity = getIdentity();
     socket.emit('clear-user-drawings', { roomId, authorId: identity.authorId });
   };
 
+  // Fetches the raw event log fresh each time (never cached) to avoid a stale view later.
+  const enterHistoryView = useCallback(() => {
+    const identity = getIdentity();
+    setHistoryLoading(true);
+    socket.emit('get-room-timeline', { roomId, authorId: identity.authorId }, (ack) => {
+      setHistoryLoading(false);
+      if (!ack || ack.status !== 'ok') {
+        const reason = ack && ack.reason;
+        const message = reason === 'room-too-large'
+          ? "This room's history is too large to scrub through."
+          : reason === 'rate-limited'
+            ? 'Please wait a moment before trying History again.'
+            : "Couldn't load room history.";
+        showToast(message, 'error');
+        return;
+      }
+      setTimelineEvents(ack.events);
+      setScrubIndex(Math.max(ack.events.length - 1, 0));
+      setHistoryMode(true);
+    });
+  }, [roomId, showToast]);
+
+  const exitHistoryView = useCallback(() => {
+    scrubStrokesRef.current = null;
+    setHistoryMode(false);
+    setTimelineEvents(null);
+    redrawAll();
+  }, [redrawAll]);
+
+  const handleToggleHistory = () => {
+    if (historyMode) {
+      exitHistoryView();
+    } else {
+      enterHistoryView();
+    }
+  };
+
+  // Recomputes the frozen scrub view on slider/timeline change; never touches opsRef/gridRef (live state).
+  useEffect(() => {
+    if (!historyMode || !timelineEvents) return;
+    scrubStrokesRef.current = reconstructStateUpTo(timelineEvents, scrubIndex).map(item => item.data);
+    redrawAll();
+  }, [historyMode, timelineEvents, scrubIndex, redrawAll]);
+
   const handleUndoClick = () => {
-    if (!canUndo) return;
+    if (!canUndo || historyModeRef.current) return;
     const identity = getIdentity();
     let targetIdx = -1;
     for (let i = opsRef.current.length - 1; i >= 0; i--) {
@@ -417,7 +492,7 @@ function Whiteboard({ roomId }) {
   };
 
   const handleRedoClick = () => {
-    if (!canRedo) return;
+    if (!canRedo || historyModeRef.current) return;
     const targetOpId = myUndoOrderRef.current.pop();
     if (targetOpId && hiddenOpsRef.current.has(targetOpId)) {
       const restored = hiddenOpsRef.current.get(targetOpId);
@@ -476,6 +551,12 @@ function Whiteboard({ roomId }) {
   // Cosmetic hint only; refreshes whenever any other state re-renders.
   const isEmpty = !isSyncing && opsRef.current.length === 0;
 
+  // Not authorized for this room yet — show the lock gate, nothing else.
+  if (joinError) {
+    // Keying by attempt forces a fresh RoomPasswordGate (cleared input) on every retry, even a repeated same-reason failure.
+    return <RoomPasswordGate key={joinError.attempt} reason={joinError.reason} onRetry={retryJoin} />;
+  }
+
   return (
     <div className={styles.page}>
       <div ref={containerRef} className={styles.container}>
@@ -494,6 +575,9 @@ function Whiteboard({ roomId }) {
           isConnected={isConnected}
           isSyncing={isSyncing}
           pendingCount={pendingCount}
+          onToggleHistory={handleToggleHistory}
+          historyActive={historyMode}
+          historyLoading={historyLoading}
         />
         <div className={styles.canvasRow}>
           <div className={styles.canvasWrapper}>
@@ -518,6 +602,14 @@ function Whiteboard({ roomId }) {
             )}
             {isEmpty && (
               <div className={styles.emptyHint}>Nothing here yet — pick a color and start drawing</div>
+            )}
+            {historyMode && timelineEvents && (
+              <HistoryScrubber
+                events={timelineEvents}
+                index={scrubIndex}
+                onChange={setScrubIndex}
+                onExit={exitHistoryView}
+              />
             )}
           </div>
           <UsersPanel presence={presence} onRename={renamePresence} />

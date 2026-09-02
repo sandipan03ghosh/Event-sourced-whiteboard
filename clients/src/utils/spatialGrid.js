@@ -1,7 +1,6 @@
 const DEFAULT_CELL_SIZE = 750;
 
-// A minimal uniform spatial grid: fixed-size cells, each holding references
-// to the items whose bounds overlap it.
+// A minimal uniform spatial grid: fixed-size cells, each holding references to items whose bounds overlap it.
 export class SpatialGrid {
   constructor(cellSize = DEFAULT_CELL_SIZE) {
     this.cellSize = cellSize;

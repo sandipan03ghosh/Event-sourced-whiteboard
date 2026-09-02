@@ -6,7 +6,7 @@ import { useToast } from '../context/ToastContext';
 const ACK_TIMEOUT_MS = 4000;
 
 // Centralizes join/reconnect, presence, resync, and ack-reconciled control ops.
-export default function useSocketSync(roomId, onSyncOps) {
+export default function useSocketSync(roomId, roomPassword, onSyncOps) {
   const { showToast } = useToast();
   const [isConnected, setIsConnected] = useState(socket.connected);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -14,17 +14,24 @@ export default function useSocketSync(roomId, onSyncOps) {
   const [presence, setPresence] = useState([]);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
+  // null | { reason: 'invalid-password' | 'server-error', attempt }
+  // attempt makes each failure a distinct object so React always re-renders on retry (it bails out on an identical setState value).
+  const [joinError, setJoinError] = useState(null);
 
   const lastSyncedIdRef = useRef(null);
   const pendingOpsRef = useRef(new Map()); // opId -> { eventName, payload, timer, onAck }
   const syncInFlightRef = useRef(false);
   const onSyncOpsRef = useRef(onSyncOps);
   onSyncOpsRef.current = onSyncOps;
+  // In-memory only (never persisted/logged) — lets reconnects re-run joinRoom without re-asking the user.
+  const passwordRef = useRef(roomPassword || '');
+  useEffect(() => { passwordRef.current = roomPassword || ''; }, [roomPassword]);
 
   const requestSync = useCallback((rid) => {
+    const identity = getIdentity();
     syncInFlightRef.current = true;
     setIsSyncing(true);
-    socket.emit('sync-since', { roomId: rid, sinceId: lastSyncedIdRef.current });
+    socket.emit('sync-since', { roomId: rid, sinceId: lastSyncedIdRef.current, authorId: identity.authorId });
   }, []);
 
   // Shared ack handler for control ops; reconciles via full resync on failure.
@@ -119,8 +126,29 @@ export default function useSocketSync(roomId, onSyncOps) {
 
   const joinRoom = useCallback((rid) => {
     const identity = getIdentity();
-    socket.emit('join-room', { roomId: rid, name: identity.name, color: identity.color, authorId: identity.authorId });
-  }, []);
+    socket.emit('join-room', {
+      roomId: rid,
+      name: identity.name,
+      color: identity.color,
+      authorId: identity.authorId,
+      password: passwordRef.current
+    }, (ack) => {
+      if (ack && ack.status === 'ok') {
+        setJoinError(null);
+        flushPending();
+        requestSync(rid);
+        queryUndoRedoState(rid);
+      } else {
+        setJoinError({ reason: (ack && ack.reason) || 'server-error', attempt: Date.now() });
+      }
+    });
+  }, [flushPending, requestSync, queryUndoRedoState]);
+
+  // Re-attempts join-room with a new password (e.g. after a rejected first try).
+  const retryJoin = useCallback((newPassword) => {
+    passwordRef.current = newPassword || '';
+    if (roomId) joinRoom(roomId);
+  }, [roomId, joinRoom]);
 
   const renamePresence = useCallback((newName) => {
     if (!roomId) return;
@@ -151,10 +179,8 @@ export default function useSocketSync(roomId, onSyncOps) {
 
     const handleConnect = () => {
       setIsConnected(true);
+      // joinRoom's own ack drives flushPending/requestSync/queryUndoRedoState once auth succeeds — see joinRoom above.
       joinRoom(roomId);
-      flushPending();
-      requestSync(roomId);
-      queryUndoRedoState(roomId);
     };
 
     const handleDisconnect = () => {
@@ -168,8 +194,6 @@ export default function useSocketSync(roomId, onSyncOps) {
 
     // Initial join, since handleConnect only fires on connect/reconnect.
     joinRoom(roomId);
-    requestSync(roomId);
-    queryUndoRedoState(roomId);
 
     return () => {
       socket.off('sync-response', handleSyncResponse);
@@ -182,7 +206,7 @@ export default function useSocketSync(roomId, onSyncOps) {
       pendingOpsRef.current.clear();
       setPendingCount(0);
     };
-  }, [roomId, flushPending, requestSync, joinRoom, queryUndoRedoState]);
+  }, [roomId, joinRoom]);
 
   return {
     isConnected,
@@ -190,6 +214,8 @@ export default function useSocketSync(roomId, onSyncOps) {
     pendingCount,
     sendDrawing,
     presence,
+    joinError,
+    retryJoin,
     renamePresence,
     setDrawingActivity,
     canUndo,

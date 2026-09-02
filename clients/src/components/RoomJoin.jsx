@@ -7,6 +7,7 @@ const ROOM_ID_PATTERN = /^[A-Za-z0-9]{6,8}$/;
 
 function RoomJoin({ onJoin }) {
   const [roomInput, setRoomInput] = useState('');
+  const [passwordInput, setPasswordInput] = useState('');
   const [error, setError] = useState('');
   const { showToast } = useToast();
 
@@ -15,7 +16,7 @@ function RoomJoin({ onJoin }) {
 
     const trimmed = roomInput.trim();
     if (trimmed.length === 0) {
-      onJoin(Math.random().toString(36).substring(2, 8).toUpperCase());
+      onJoin(Math.random().toString(36).substring(2, 8).toUpperCase(), passwordInput);
       return;
     }
 
@@ -26,7 +27,7 @@ function RoomJoin({ onJoin }) {
     }
 
     setError('');
-    onJoin(trimmed);
+    onJoin(trimmed, passwordInput);
   };
 
   return (
@@ -40,11 +41,22 @@ function RoomJoin({ onJoin }) {
           placeholder="Enter room code or leave blank for new room"
           className={styles.input}
         />
+        <input
+          type="password"
+          value={passwordInput}
+          onChange={(e) => setPasswordInput(e.target.value)}
+          placeholder="Room password (optional)"
+          className={styles.input}
+          autoComplete="off"
+        />
         <button type="submit" className={styles.button}>
           Join Room
         </button>
       </form>
       {error && <p className={styles.error}>{error}</p>}
+      <p className={styles.hint}>
+        Setting a password when creating a room protects it; leave it blank for an open room.
+      </p>
     </div>
   );
 }

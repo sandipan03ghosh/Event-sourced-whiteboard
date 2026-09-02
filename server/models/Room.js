@@ -15,6 +15,8 @@ const RoomSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now },
   lastActivity: { type: Date, default: Date.now },
   drawingData: [DrawingCommandSchema],
+  // null = no password required; set once, at room creation.
+  passwordHash: { type: String, default: null },
 });
 
 module.exports = mongoose.model('Room', RoomSchema);

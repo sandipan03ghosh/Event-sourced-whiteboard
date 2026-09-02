@@ -1,22 +1,26 @@
 import React, { useState, useEffect } from 'react';
 import RoomJoin from './components/RoomJoin';
 import Whiteboard from './components/Whiteboard';
+import ThemeToggle from './components/ThemeToggle';
 import socket from './socket';
 import styles from './components/App.module.css';
 
 function App() {
   const [roomId, setRoomId] = useState('');
-  
-  const handleJoinRoom = (newRoomId) => {
+  const [roomPassword, setRoomPassword] = useState('');
+
+  const handleJoinRoom = (newRoomId, password) => {
     setRoomId(newRoomId);
+    setRoomPassword(password || '');
   };
-  
+
   const handleLeaveRoom = () => {
     if (roomId) {
       socket.emit('leave-room', roomId);
       console.log(`Leaving room: ${roomId}`);
     }
     setRoomId('');
+    setRoomPassword('');
   };
 
   useEffect(() => {
@@ -38,6 +42,7 @@ function App() {
 
   return (
     <div className={styles.app}>
+      <ThemeToggle />
       {roomId === '' ? (
         <RoomJoin onJoin={handleJoinRoom} />
       ) : (
@@ -47,7 +52,7 @@ function App() {
             <p className={styles.roomHint}>Share this room code with others to collaborate!</p>
             <button className={styles.leaveButton} onClick={handleLeaveRoom}>Leave Room</button>
           </div>
-          <Whiteboard roomId={roomId} />
+          <Whiteboard roomId={roomId} roomPassword={roomPassword} />
         </div>
       )}
     </div>
