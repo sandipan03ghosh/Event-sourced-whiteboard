@@ -1,0 +1,18 @@
+{
+  "name": "event-sourced-collaborative-canvas-platform",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Real-time event-sourced collaborative canvas platform",
+  "main": "server/server.js",
+  "scripts": {
+    "dev": "concurrently \"npm --prefix server run dev\" \"npm --prefix clients run dev\"",
+    "start": "npm --prefix server start",
+    "build": "npm --prefix clients run build"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.5"
+  }
+}

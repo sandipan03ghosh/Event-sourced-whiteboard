@@ -1,0 +1,37 @@
+/* Shared, plain (non-module) global CSS: the "is drawing" pulse-dot needs one
+   literal class name/@keyframes usable identically from two separate files
+   (UserCursors.jsx and UsersPanel.jsx) — the one deliberate exception to this
+   project's CSS Modules convention. */
+.presence-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-warning);
+  flex-shrink: 0;
+}
+
+.presence-dot--active {
+  animation: presence-pulse 1.4s var(--ease-standard) infinite;
+}
+
+@keyframes presence-pulse {
+  0% {
+    transform: scale(0.85);
+    opacity: 0.7;
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(0.85);
+    opacity: 0.7;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .presence-dot--active {
+    animation: none;
+  }
+}

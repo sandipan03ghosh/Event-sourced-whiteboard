@@ -1,0 +1,9 @@
+{
+  "short_name": "CanvasSync",
+  "name": "CanvasSync - Real-Time Collaborative Whiteboard Platform",
+  "icons": [],
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#2563eb",
+  "background_color": "#ffffff"
+}
